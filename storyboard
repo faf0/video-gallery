@@ -106,7 +106,7 @@ create_thumbnail () {
 
   echo "*** Resizing frames..."
   for img in "$WORK_DIR/${video_no_ext}"*.$IMAGE_FORMAT; do
-    convert -quality 100 -resize "$THUMBSIZE" "$img" "$img" 
+    convert -quality 100 -resize "$THUMBSIZE" "$img" "$img"
   done
 
   echo "*** Assembling montage..."
