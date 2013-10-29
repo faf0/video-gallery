@@ -1,0 +1,140 @@
+#!/bin/bash
+
+set -e # die on error
+[[ ${!DEBUG[@]} ]] && set -x # show debug output if DEBUG was set
+set -u # warn about trying to access unset vars
+
+# Original credit for this script goes to
+# Ryan Taylor Long:
+# https://github.com/rtlong/video-gallery
+# Rich Jerrido:
+# http://www.outsidaz.org/blog/2009/10/26/screencap-generation-via-ffmpeg-and-imagemagick/
+
+# Number of Thumbnails to be created. It is advisable to use a number that makes a perfect square such as 9,16,25
+MAXTHUMB=25
+IMAGE_FORMAT=png
+# Size of thumbnails
+THUMBSIZE=160
+# Seconds to skip in beginning and end
+SKIP_SEC=10
+# Working directory
+WORK_DIR="/tmp/thumbnail"
+# Output directory.
+# Set as "" to store the image where the video is.
+OUTPUT_DIR=""
+
+# Check for dependencies
+for dep in {convert,montage}; do
+  hash $dep 2>&- || { echo >&2 "I require '$dep' but it's not installed. It's available as part of the ImageMagick suite. Aborting."; exit 1; }
+done
+for dep in {avconv,ffprobe}; do
+  hash $dep 2>&- || { echo >&2 "I require '$dep' but it's not installed. Hint: Install the 'ffmpeg' package. Aborting."; exit 1; }
+done
+hash 'bc' 2>&- || { echo >&2 "I require 'bc' but it's not installed. Aborting."; exit 1; }
+
+# clean up temp during exit
+clean_up () {
+  [[ ${!DEBUG[@]} ]] || rm -rf $WORK_DIR # wipe the temp dir, but only if not debugging
+}
+
+create_thumbnail () {
+  # Video file to work on
+  VIDEO=$(readlink -e "$1")
+
+  # output directory
+  if [ -z "$OUTPUT_DIR" ]; then
+    OUTPUT_DIR=$(dirname "$VIDEO")
+  fi
+
+  # clear work directory before each run
+  rm -rf "$WORK_DIR"
+
+  # create work dir if non-existent
+  [[ -w "$WORK_DIR" ]] || mkdir -p "$WORK_DIR"
+  # create output dir if non-existent
+  [[ -w "$OUTPUT_DIR" ]] || mkdir -p "$OUTPUT_DIR"
+
+  ## These variables gather some information about the video file
+  video_info=$( ffprobe "$VIDEO" 2>&1 )
+
+  duration_string=$( grep -Eo "Duration: [0-9]{2,}:[0-9]{2}:[0-9]{2}.[0-9]{2}" <<< "$video_info" | cut -f2 -d" " )
+  IFS=':' read -ra duration_array <<< "$duration_string"
+  duration_hours=${duration_array[0]}
+  duration_minutes=${duration_array[1]}
+  duration_seconds=${duration_array[2]}
+  duration=$( echo "$duration_seconds + 60*$duration_minutes + 3600*$duration_hours" | bc )
+  fps=$( sed -n "s/.*, \(.*\) tbr.*/\1/p" <<< "$video_info" )
+  size=$( grep "Video:" <<< "$video_info" | grep -Eo '[0-9]+x[0-9]+' )
+  width=$( cut -f 1 -d "x" <<< $size )
+  height=$( cut -f 2 -d "x" <<< $size )
+  codec=$( grep -Eo "Video: [^ ,]+" <<< "$video_info" | cut -f 2 -d " " )
+
+  video_basename=$( basename "$VIDEO" )
+  echo "*** You specified an input file of -> $VIDEO"
+  echo "*** You specified a working directory of -> $WORK_DIR"
+  echo "*** You specified a output directory of -> $OUTPUT_DIR"
+
+  video_no_ext="${video_basename%.*}"
+  temp_image="$WORK_DIR/$video_no_ext.$IMAGE_FORMAT"
+  output_image="$OUTPUT_DIR/$video_no_ext.$IMAGE_FORMAT"
+  interval=$( echo "($duration - 2 * $SKIP_SEC) / ($MAXTHUMB + 1)" | bc )
+
+  trap 'clean_up' INT # Quit on ^C instead of killing the avconv process and continuing
+
+  echo "*** Extracting ${MAXTHUMB} frames... " # leave the extra spaces on the end for the counter to delete
+  avconv_log="$WORK_DIR/avconv_output"
+
+  # Dump MAXTHUMB frames from the video, starting at $SKIP_SEC and evenly spaced till the end - $SKIP_SEC
+  vid_too_short=$( echo "$duration < ($SKIP_SEC * 2)" | bc )
+  if [ $vid_too_short = "1" ]; then
+    echo "Setting SKIP_SEC to 0. Video duration is less than 2 * SKIP_SEC."
+    SKIP_SEC=0
+  fi
+
+  digits=${#MAXTHUMB}
+  for numthumb in `seq 1 $MAXTHUMB`;
+  do
+    curr_interval=`echo "$numthumb * $interval + $SKIP_SEC" | bc`
+    printf -v numthumbf "%.*d" $digits $numthumb
+    avconv -y -ss $curr_interval -i "$VIDEO" -an -vframes 1 -f image2 "$WORK_DIR/${video_no_ext}${numthumbf}.$IMAGE_FORMAT" 2> "$avconv_log"
+    if [ $? -ne 0 ]; then
+      echo "avconv failed for input $VIDEO"
+      clean_up
+      exit 1
+    fi
+  done
+
+  echo "*** Resizing frames..."
+  for img in "$WORK_DIR/${video_no_ext}"*.$IMAGE_FORMAT; do
+    convert -quality 100 -resize "$THUMBSIZE" "$img" "$img" 
+  done
+
+  echo "*** Assembling montage..."
+  montage -background black -borderwidth 0 -geometry "+1+1" "$WORK_DIR/${video_no_ext}"*".$IMAGE_FORMAT" "$temp_image"
+
+  LABEL="Filename: $video_basename | Codec: $codec | Size: $size | Length: $duration_string | FPS: $fps"
+  echo "*** I will apply the following label -> $LABEL"
+
+  convert -gravity North -splice 0x28 -background black -fill white -font DejaVu-Sans-Book -pointsize 12 -annotate +0+6 "$LABEL" "$temp_image" "$output_image"
+
+  echo "*** Final screencap image is stored here -> $output_image"
+
+  clean_up
+}
+
+# Check if command-line argument was provided
+if [ $# -lt 1 ]; then
+  echo "usage: $0 FILE..."
+  exit 1
+fi
+
+# Iterate over argument files
+for file in "$@"; do
+  if [ -f "$file" ]; then
+    create_thumbnail "$file"
+  else
+    echo "Not a file '$file'. Ignoring."
+  fi
+done
+
+exit
