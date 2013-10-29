@@ -10,8 +10,8 @@ Installation
 ============
 
 * Install FFmpeg and ImageMagick
-* `chmod +x ./video-thumb`
-* `./video-thumb video1 video2`
+* `chmod +x ./storyboard`
+* `./storyboard video1 video2`
 
 Acknowledgements
 ================
